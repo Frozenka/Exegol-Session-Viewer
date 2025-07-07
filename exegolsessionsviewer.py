@@ -22,8 +22,12 @@ def ensure_venv():
         if not os.path.exists(venv_path):
             subprocess.check_call([sys.executable, "-m", "venv", venv_path])
         pip = os.path.join(venv_path, "bin", "pip")
-        subprocess.check_call([pip, "install", "--upgrade", "pip"])
-        subprocess.check_call([pip, "install"] + required_pkgs)
+        try:
+            subprocess.check_call([pip, "install", "--upgrade", "pip"])
+            subprocess.check_call([pip, "install"] + required_pkgs)
+        except subprocess.CalledProcessError as e:
+            print(f"[!] Error installing dependencies: {e}")
+            sys.exit(1)
         os.environ["IN_VENV"] = "1"
         os.execv(expected_python, [expected_python] + sys.argv)
 ensure_venv()
@@ -56,7 +60,8 @@ def index():
                 line = f.readline()
                 header = json.loads(line) if line.startswith('{') else {}
                 ts = header.get('timestamp', os.path.getmtime(path))
-        except:
+        except Exception as e:
+            print(f"[!] Error reading {path}: {e}")
             ts = os.path.getmtime(path)
         files.append((container, datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), path))
     containers = sorted(containers)
@@ -289,7 +294,8 @@ def convert_to_cast(path):
         if isinstance(maybe_header, dict) and "version" in maybe_header:
             header.update(maybe_header)
             lines = lines[1:]
-    except:
+    except Exception as e:
+        print(f"[!] Error parsing header: {e}")
         pass
     tmp.write(json.dumps(header) + "\n")
     for line in lines:
@@ -300,7 +306,8 @@ def convert_to_cast(path):
                     clean_output = ANSI_ESCAPE.sub('', evt[2])
                     if clean_output.strip():
                         tmp.write(json.dumps([evt[0], "o", clean_output]) + "\n")
-            except:
+            except Exception as e:
+                print(f"[!] Error parsing event: {e}")
                 continue
     tmp.close()
     return tmp.name
@@ -331,7 +338,7 @@ def convert_cast_to_mp4_progress(cast_path, mp4_path, progress_path):
                     images.append(np.array(img))
                     timestamps.append(evt[0])
             except Exception as e:
-                print(f"[DEBUG] Frame {i} error: {e}")
+                print(f"[!] Frame {i} error: {e}")
             if i % 10 == 0 or i == total - 1:
                 with open(progress_path, "w") as pf:
                     pf.write(json.dumps({
