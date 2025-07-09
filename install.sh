@@ -37,11 +37,13 @@ fi
 if ! grep -Fxq "$ALIAS" "$RC"; then
     echo "[+] Adding alias to $RC"
     echo "$ALIAS" >> "$RC"
+    source "$RC"
+    echo "[*] Alias 'esv' is now available in your current shell."
 else
     echo "[*] Alias already exists in $RC"
+    source "$RC"
 fi
 
 echo
 echo "[✓] Installed successfully."
-echo "➡️  Restart your terminal or run: source $RC"
-echo "➡️  Then use: esv"
+echo "➡️  You can now use: esv"
