@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, subprocess, urllib.request, hashlib
+import os, sys, subprocess, urllib.request, hashlib, webbrowser
 
 venv_path = os.path.expanduser("~/.venv/exegol-replay")
 python_path = os.path.join(venv_path, "bin", "python3")
@@ -35,67 +35,99 @@ def get_remote_sha256(url):
         print(f"[!] Error fetching remote file: {e}")
         return None
 
-def ask_update(file_name):
+def ask_update():
     while True:
-        rep = input(f"[!] An update for {file_name} is available. Do you want to apply it? (Y/n) ").strip().lower()
+        rep = input("[!] An update for Exegol Session Viewer is available. Do you want to apply it? (Y/n) ").strip().lower()
         if rep in ["", "y", "yes"]:
             return True
         elif rep in ["n", "no"]:
             return False
 
-def auto_update(local_path, remote_url, main_script=False):
-    local_hash = sha256sum(local_path)
-    remote_hash = get_remote_sha256(remote_url)
-    if local_hash != remote_hash:
-        file_name = os.path.basename(local_path)
-        if ask_update(file_name):
-            print(f"[+] Updating {file_name} ...")
-            try:
-                urllib.request.urlretrieve(remote_url, local_path)
-                print(f"[+] {file_name} updated.")
-                if main_script:
-                    print("[*] Restarting the script after main file update...")
-                    os.execv(sys.executable, [sys.executable] + sys.argv)  # Restart wrapper
-            except Exception as e:
-                print(f"[!] Error downloading {file_name}: {e}")
+def auto_update(files):
+    # files: list of (local_path, remote_url, main_script_bool)
+    needs_update = False
+    for local_path, remote_url, main_script in files:
+        local_hash = sha256sum(local_path)
+        remote_hash = get_remote_sha256(remote_url)
+        if local_hash != remote_hash:
+            needs_update = True
+            break
+    if needs_update:
+        if ask_update():
+            for local_path, remote_url, main_script in files:
+                try:
+                    print("[+] Updating Exegol Session Viewer ...")
+                    urllib.request.urlretrieve(remote_url, local_path)
+                    print("[+] Exegol Session Viewer updated.")
+                    if main_script:
+                        print("[*] Restarting the script after update...")
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception as e:
+                    print(f"[!] Error updating Exegol Session Viewer: {e}")
         else:
-            print(f"[!] {file_name} was NOT updated (update skipped).")
+            print("[!] Exegol Session Viewer update was skipped.")
     else:
-        print(f"[+] {os.path.basename(local_path)} is up to date.")
+        print("[+] Exegol Session Viewer is up to date.")
 
 # --- AUTO-UPDATE SECTION ---
-auto_update(tty2img_path, tty2img_url)
-auto_update(script_real, exegolviewer_url, main_script=True)
+FILES = [
+    (tty2img_path, tty2img_url, False),
+    (script_real, exegolviewer_url, True)
+]
+auto_update(FILES)
 
 # --- ENV SETUP ---
 if not os.path.exists(venv_path):
-    print("[+] Creating virtual environment for Exegol Replay...")
-    subprocess.check_call([sys.executable, "-m", "venv", venv_path])
+    subprocess.check_call([sys.executable, "-m", "venv", venv_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 pip = os.path.join(venv_path, "bin", "pip")
 try:
-    subprocess.check_call([pip, "install", "--upgrade", "pip"])
+    subprocess.check_call([pip, "install", "--upgrade", "pip"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 except subprocess.CalledProcessError:
-    print("[!] Error upgrading pip")
+    pass
 
 dependencies = ["moviepy", "flask", "pyte", "numpy", "Pillow"]
 for dep in dependencies:
     try:
-        subprocess.check_call([pip, "install", dep])
-        print(f"[+] {dep} installed successfully")
+        subprocess.check_call([pip, "install", dep],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
-        print(f"[!] Error installing {dep}")
+        pass
 
 editor_py = os.path.join(
     venv_path, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}",
     "site-packages", "moviepy", "editor.py"
 )
 if not os.path.exists(editor_py):
-    print("[!] moviepy/editor.py missing, patching automatically for compatibility...")
     moviepy_dir = os.path.dirname(editor_py)
     if not os.path.exists(moviepy_dir):
         os.makedirs(moviepy_dir)
     with open(editor_py, "w") as f:
         f.write("from moviepy import *\n")
 
-os.execv(python_path, [python_path, script_real] + sys.argv[1:])
+# LAUNCH THE SCRIPT AND PRINT ONLY THE FINAL MESSAGE
+def run_and_wait():
+    from subprocess import Popen, PIPE, STDOUT
+    proc = Popen([python_path, script_real] + sys.argv[1:], stdout=PIPE, stderr=STDOUT, text=True)
+    url = None
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            if "Running on http://" in line or "Running on https://" in line:
+                url = line.strip().split("Running on ")[-1]
+                print(f"Running on {url}")
+                break  # On s'arrête dès qu'on a l'URL
+        if url:
+            ans = input("Do you want to open Exegol Session Viewer in your browser? (Y/n) ").strip().lower()
+            if ans in ["", "y", "yes"]:
+                webbrowser.open(url)
+        for line in proc.stdout:
+            pass  # Optionally suppress further output
+    except KeyboardInterrupt:
+        proc.terminate()
+
+run_and_wait()
