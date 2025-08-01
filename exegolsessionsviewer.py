@@ -9,7 +9,7 @@ import json
 import re
 from flask import Flask, render_template_string, request, send_file, send_from_directory, jsonify
 from glob import glob
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 import numpy as np
 
@@ -63,21 +63,25 @@ def index():
         except Exception as e:
             print(f"[!] Error reading {path}: {e}")
             ts = os.path.getmtime(path)
-        files.append((container, datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), path))
+        duration = get_session_duration(path)
+        start_dt = datetime.fromtimestamp(ts)
+        end_dt = start_dt + timedelta(seconds=duration)
+        
+        files.append((container, start_dt.strftime('%Y-%m-%d %H:%M:%S'), end_dt.strftime('%Y-%m-%d %H:%M:%S'), path))
     containers = sorted(containers)
     result = []
     if start and end:
         dt_start = datetime.fromisoformat(start)
         dt_end = datetime.fromisoformat(end)
-        for c, dts, p in files:
-            dt = datetime.strptime(dts, '%Y-%m-%d %H:%M:%S')
+        for c, start_dts, end_dts, p in files:
+            dt = datetime.strptime(start_dts, '%Y-%m-%d %H:%M:%S')
             if (not selected or c == selected) and dt_start <= dt <= dt_end:
-                result.append((c, dts, p))
+                result.append((c, start_dts, end_dts, p))
     else:
         result = files if not selected else [f for f in files if f[0] == selected]
     grouped = defaultdict(list)
-    for c, d, p in sorted(result, key=lambda x: (x[0], x[1]), reverse=True):
-        grouped[c].append((d, p))
+    for c, start_d, end_d, p in sorted(result, key=lambda x: (x[0], x[1]), reverse=True):
+        grouped[c].append((start_d, end_d, p))
     return render_template_string("""
 <!doctype html><html><head>
 <title>Exegol Sessions Viewer</title>
@@ -94,6 +98,8 @@ def index():
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: 8px; border-bottom: 1px solid #444; }
   .view-cell { text-align: right; white-space: nowrap; }
+  .date-cell { font-family: monospace; font-size: 0.9em; text-align: center; }
+  .date-header { text-align: center; }
   a.view-link, a.download-link { background: #0099cc; color: #fff; padding: 6px 10px; border-radius: 5px; text-decoration: none; margin-left: 5px; }
   a.view-link:hover, a.download-link:hover { background: #0077aa; }
   footer { text-align: center; margin-top: 40px; font-size: 0.9em; color: #777; }
@@ -123,10 +129,11 @@ def index():
 <div class="container-group">
   <div class="container-title">{{ container }}</div>
   <table>
-    <tr><th>Date</th><th class="view-cell">Action</th></tr>
-    {% for date, path in sessions %}
+    <tr><th class="date-header">Start</th><th class="date-header">End</th><th class="view-cell">Action</th></tr>
+    {% for start_date, end_date, path in sessions %}
     <tr>
-      <td>{{ date }}</td>
+      <td class="date-cell">{{ start_date }}</td>
+      <td class="date-cell">{{ end_date }}</td>
       <td class="view-cell">
         <a class="view-link" href="/view?file={{ path }}">🎥 View</a>
         <a class="download-link" href="/view?file={{ path }}&download=1">💾 Download</a>
@@ -358,6 +365,28 @@ setTimeout(poll, 1000);
 </body></html>
     """, mp4_path=mp4_path, start=start, end=end, format_time=format_time)
 
+def get_session_duration(path):
+    """Calcule la durée d'une session en lisant le fichier asciinema"""
+    try:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, 'rt', encoding='utf-8', errors='ignore') as f_in:
+            next(f_in, None)
+            events = []
+            for line in f_in:
+                if line.strip().startswith("["):
+                    try:
+                        evt = json.loads(line)
+                        if isinstance(evt, list) and len(evt) >= 3:
+                            events.append(evt[0])  # timestamp
+                    except Exception:
+                        continue
+            if len(events) >= 2:
+                return events[-1] - events[0]
+            return 0
+    except Exception as e:
+        print(f"[!] Erreur calcul durée session {path}: {e}")
+        return 0
+
 def format_time(seconds):
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
@@ -464,9 +493,7 @@ def convert_cast_to_mp4_progress_extract(cast_path, mp4_path, progress_path, sta
             lines = f.readlines()
         header = json.loads(lines[0])
         events = [json.loads(l) for l in lines[1:] if l.strip() and l.startswith("[")]
-        # Filtrer les events par plage temporelle
         filtered_events = [e for e in events if start_time <= e[0] <= end_time]
-        # Ajuster les timestamps pour commencer à 0
         if filtered_events:
             time_offset = filtered_events[0][0]
             for e in filtered_events:
