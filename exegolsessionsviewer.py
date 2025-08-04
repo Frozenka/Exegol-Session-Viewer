@@ -7,6 +7,7 @@ import tempfile
 import gzip
 import json
 import re
+import time
 from flask import Flask, render_template_string, request, send_file, send_from_directory, jsonify
 from glob import glob
 from datetime import datetime, timedelta
@@ -44,6 +45,46 @@ ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 def logo():
     return send_from_directory('.', 'logo.png')
 
+@app.route("/delete_log")
+def delete_log():
+    path = request.args.get("file")
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+            return jsonify({"success": True, "message": "Log deleted successfully"})
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Error deleting log: {e}"})
+    return jsonify({"success": False, "message": "Log not found"})
+
+@app.route("/save_comment")
+def save_comment():
+    path = request.args.get("file")
+    comment = request.args.get("comment", "")
+    
+    if path:
+        comment_file = path + ".comment"
+        try:
+            with open(comment_file, "w", encoding="utf-8") as f:
+                f.write(comment)
+            return jsonify({"success": True, "message": "Comment saved successfully"})
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Error saving comment: {e}"})
+    return jsonify({"success": False, "message": "Invalid file path"})
+
+@app.route("/get_comment")
+def get_comment():
+    path = request.args.get("file")
+    if path:
+        comment_file = path + ".comment"
+        if os.path.exists(comment_file):
+            try:
+                with open(comment_file, "r", encoding="utf-8") as f:
+                    comment = f.read()
+                return jsonify({"success": True, "comment": comment})
+            except Exception as e:
+                return jsonify({"success": False, "message": f"Error reading comment: {e}"})
+    return jsonify({"success": False, "comment": ""})
+
 @app.route("/")
 def index():
     base = os.path.expanduser("~/.exegol/workspaces")
@@ -51,7 +92,18 @@ def index():
     start = request.args.get("start")
     end = request.args.get("end")
     files, containers = [], set()
+    seen_paths = set()
+    
     for path in glob(base + "/*/logs/*.asciinema*"):
+        # Ignorer les fichiers .comment
+        if path.endswith('.comment'):
+            continue
+        # Dédupliquer les fichiers .asciinema et .asciinema.gz
+        base_path = path.replace('.gz', '')
+        if base_path in seen_paths:
+            continue
+        seen_paths.add(base_path)
+        
         container = path.split(os.sep)[-3]
         containers.add(container)
         try:
@@ -80,72 +132,608 @@ def index():
     else:
         result = files if not selected else [f for f in files if f[0] == selected]
     grouped = defaultdict(list)
+    seen_sessions = set()
+    
     for c, start_d, end_d, p in sorted(result, key=lambda x: (x[0], x[1]), reverse=True):
+        # Dédupliquer au niveau session (container + start_time + end_time)
+        session_key = f"{c}_{start_d}_{end_d}"
+        if session_key in seen_sessions:
+            continue
+        seen_sessions.add(session_key)
         grouped[c].append((start_d, end_d, p))
     return render_template_string("""
-<!doctype html><html><head>
-<title>Exegol Sessions Viewer</title>
-<style>
-  body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; }
-  .logo { text-align: center; margin-bottom: 10px; }
-  .logo img { height: 80px; }
-  .content { max-width: 960px; margin: auto; }
-  h2 { text-align: center; }
-  form { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
-  select, input, button { padding: 6px; border-radius: 5px; border: none; }
-  .container-group { background: #222; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 0 8px #333; }
-  .container-title { background: #333; padding: 10px; font-weight: bold; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 8px; border-bottom: 1px solid #444; }
-  .view-cell { text-align: right; white-space: nowrap; }
-  .date-cell { font-family: monospace; font-size: 0.9em; text-align: center; }
-  .date-header { text-align: center; }
-  a.view-link, a.download-link { background: #0099cc; color: #fff; padding: 6px 10px; border-radius: 5px; text-decoration: none; margin-left: 5px; }
-  a.view-link:hover, a.download-link:hover { background: #0077aa; }
-  footer { text-align: center; margin-top: 40px; font-size: 0.9em; color: #777; }
-  footer a { color: #aaa; text-decoration: none; font-weight: bold; }
-</style></head><body>
-<div class="logo"><a href="https://github.com/Frozenka/Exegol-Session-Viewer" target="_blank"><img src="/logo.png" alt="logo"></a></div>
-<div class="content">
-<form method="get">
-  <label>Container:
-    <select name="container">
-      <option value="">All</option>
-      {% for c in containers %}
-        <option value="{{c}}" {% if c==selected %}selected{% endif %}>{{c}}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>Start:
-    <input type="datetime-local" name="start" value="{{start or ''}}">
-  </label>
-  <label>End:
-    <input type="datetime-local" name="end" value="{{end or ''}}">
-  </label>
-  <button type="submit">Search</button>
-</form>
-
-{% for container, sessions in grouped.items() %}
-<div class="container-group">
-  <div class="container-title">{{ container }}</div>
-  <table>
-    <tr><th class="date-header">Start</th><th class="date-header">End</th><th class="view-cell">Action</th></tr>
-    {% for start_date, end_date, path in sessions %}
-    <tr>
-      <td class="date-cell">{{ start_date }}</td>
-      <td class="date-cell">{{ end_date }}</td>
-      <td class="view-cell">
-        <a class="view-link" href="/view?file={{ path }}">🎥 View</a>
-        <a class="download-link" href="/view?file={{ path }}&download=1">💾 Download</a>
-        <a class="download-link" href="/processing?file={{ path }}" onclick="alert('MP4 generation is experimental and may not work perfectly.');">🎬 Download MP4</a>
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
-</div>
-{% endfor %}
-<footer>Made for <a href="https://exegol.com" target="_blank">Exegol</a> with ❤️</footer>
-</div></body></html>""", grouped=grouped, containers=containers, selected=selected, start=start, end=end)
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exegol Session Manager Pro</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+            color: #e8e8e8;
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+        
+        .header {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 1.5rem 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .header-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .logo img {
+            height: 80px;
+            filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.3));
+        }
+        
+        .main-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .dashboard-header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+        
+        .dashboard-title {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .dashboard-subtitle {
+            font-size: 1.1rem;
+            color: #a0a0a0;
+            font-weight: 300;
+        }
+        
+        .filters-card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        .filters-form {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            align-items: end;
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .form-label {
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: #a0a0a0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .form-input, .form-select {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            color: #e8e8e8;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+        
+        .form-input:focus, .form-select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            background: rgba(255, 255, 255, 0.15);
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 0.75rem 2rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        }
+        
+        .container-card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            margin-bottom: 2rem;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .container-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+        }
+        
+        .container-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 1.5rem 2rem;
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: white;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .accordion-header:hover {
+            background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+        }
+        
+        .accordion-icon {
+            transition: transform 0.3s ease;
+        }
+        
+        .container-content {
+            display: block;
+        }
+        
+        .container-content.collapsed {
+            display: none;
+        }
+        
+        .comment-section {
+            display: flex;
+            gap: 0.5rem;
+            align-items: flex-start;
+        }
+        
+        .comment-input {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            padding: 0.5rem;
+            color: #e8e8e8;
+            font-size: 0.85rem;
+            resize: vertical;
+            min-height: 40px;
+            max-height: 80px;
+            font-family: inherit;
+        }
+        
+        .comment-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+        }
+        
+        .save-comment-btn {
+            padding: 0.5rem;
+            min-width: auto;
+            height: fit-content;
+        }
+        
+        .container-icon {
+            font-size: 1.1rem;
+        }
+        
+        .sessions-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .sessions-table th {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 1rem 1.5rem;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #a0a0a0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .sessions-table td {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            transition: background 0.3s ease;
+        }
+        
+        .sessions-table tr:hover td {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        
+        .session-time {
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            font-size: 0.9rem;
+            color: #a0a0a0;
+        }
+        
+        .actions-group {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            border: none;
+            cursor: pointer;
+        }
+        
+        .btn-view {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+        }
+        
+        .btn-download {
+            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            color: white;
+        }
+        
+        .btn-mp4 {
+            background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+            color: white;
+        }
+        
+        .btn-danger {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
+            color: white;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            color: #a0a0a0;
+            font-size: 0.9rem;
+        }
+        
+        .footer a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        
+        .footer a:hover {
+            text-decoration: underline;
+        }
+        
+        @media (max-width: 768px) {
+            .main-content {
+                padding: 1rem;
+            }
+            
+            .dashboard-title {
+                font-size: 2rem;
+            }
+            
+            .filters-form {
+                grid-template-columns: 1fr;
+            }
+            
+            .actions-group {
+                flex-direction: column;
+            }
+            
+            .btn {
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <img src="/logo.png" alt="Exegol">
+            </div>
+        </div>
+    </header>
+    
+    <main class="main-content">
+        <div class="dashboard-header">
+            <h1 class="dashboard-title">Session Dashboard</h1>
+        </div>
+        
+        <div class="filters-card">
+            <form method="get" class="filters-form">
+                <div class="form-group">
+                    <label class="form-label">Container</label>
+                    <select name="container" class="form-select">
+                        <option value="">All containers</option>
+                        {% for c in containers %}
+                        <option value="{{c}}" {% if c==selected %}selected{% endif %}>{{c}}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Start Date</label>
+                    <input type="datetime-local" name="start" value="{{start or ''}}" class="form-input">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">End Date</label>
+                    <input type="datetime-local" name="end" value="{{end or ''}}" class="form-input">
+                </div>
+                <div class="form-group">
+                    <button type="submit" class="btn-primary">
+                        <i class="fas fa-filter"></i> Apply Filters
+                    </button>
+                </div>
+            </form>
+        </div>
+        
+        {% for container, sessions in grouped.items() %}
+        <div class="container-card">
+            <div class="container-header accordion-header" onclick="toggleContainer('{{ container|replace(' ', '_')|replace('-', '_')|replace('.', '_') }}')">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <i class="fas fa-chevron-down accordion-icon" id="icon-{{ container|replace(' ', '_')|replace('-', '_')|replace('.', '_') }}" style="transform: rotate(-90deg);"></i>
+                    <i class="fas fa-server container-icon"></i>
+                    {{ container }}
+                </div>
+            </div>
+            <div class="container-content collapsed" id="content-{{ container|replace(' ', '_')|replace('-', '_')|replace('.', '_') }}">
+                <table class="sessions-table">
+                    <thead>
+                        <tr>
+                            <th>Start Time</th>
+                            <th>End Time</th>
+                            <th>Comment</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for start_date, end_date, path in sessions %}
+                        <tr>
+                            <td class="session-time">{{ start_date }}</td>
+                            <td class="session-time">{{ end_date }}</td>
+                            <td>
+                                <div class="comment-section">
+                                    <textarea class="comment-input" placeholder="Add a comment..." data-file="{{ path }}" id="comment-{{ path|replace('/', '_')|replace('.', '_') }}" value=""></textarea>
+                                    <button class="btn btn-primary save-comment-btn" onclick="saveComment('{{ path }}')">
+                                        <i class="fas fa-save"></i>
+                                    </button>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="actions-group">
+                                    <a class="btn btn-view" href="/view?file={{ path }}">
+                                        <i class="fas fa-play"></i> View
+                                    </a>
+                                    <a class="btn btn-download" href="/view?file={{ path }}&download=1">
+                                        <i class="fas fa-download"></i> Download
+                                    </a>
+                                    <a class="btn btn-mp4" href="/processing?file={{ path }}" onclick="alert('Full MP4 generation is very long.');">
+                                        <i class="fas fa-video"></i> MP4
+                                    </a>
+                                    <button type="button" class="btn btn-danger" onclick="deleteLog('{{ path }}'); return false;">
+                                        <i class="fas fa-trash"></i> Delete
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endfor %}
+    </main>
+    
+    <footer class="footer">
+        <div style="text-align: center; padding: 2rem; color: #a0a0a0; font-size: 0.9rem;">
+            Made for <a href="https://exegol.com" target="_blank" style="color: #667eea; text-decoration: none; font-weight: 500;">Exegol</a> with ❤️
+        </div>
+    </footer>
+    
+    <script>
+        // Accordion functionality
+        function toggleContainer(containerId) {
+            console.log('toggleContainer called with:', containerId);
+            const content = document.getElementById('content-' + containerId);
+            const icon = document.getElementById('icon-' + containerId);
+            
+            console.log('content element:', content);
+            console.log('icon element:', icon);
+            
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                icon.style.transform = 'rotate(0deg)';
+                localStorage.setItem('lastOpenAccordion', containerId);
+                console.log('Expanded container');
+            } else {
+                content.classList.add('collapsed');
+                icon.style.transform = 'rotate(-90deg)';
+                localStorage.removeItem('lastOpenAccordion');
+                console.log('Collapsed container');
+            }
+        }
+        
+        // Delete log functionality
+        function deleteLog(filePath) {
+            console.log('deleteLog called with:', filePath);
+            event.preventDefault();
+            event.stopPropagation();
+            
+            if (confirm('⚠️ WARNING: This will permanently delete the log file!\\n\\nThis action cannot be undone. Are you sure you want to delete this log?')) {
+                console.log('User confirmed deletion');
+                fetch('/delete_log?file=' + encodeURIComponent(filePath))
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log('Delete response:', data);
+                        if (data.success) {
+                            alert('✅ Log deleted successfully');
+                            location.reload();
+                        } else {
+                            alert('❌ Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Delete error:', error);
+                        alert('❌ Error: ' + error);
+                    });
+            }
+        }
+        
+        // Save comment functionality
+        function saveComment(filePath) {
+            console.log('saveComment called with:', filePath);
+            const commentId = 'comment-' + filePath.replace(/\//g, '_').replace(/\./g, '_');
+            const commentInput = document.getElementById(commentId);
+            if (!commentInput) {
+                console.error('Could not find comment input for:', filePath, 'id:', commentId);
+                return;
+            }
+            const comment = commentInput.value;
+            
+            console.log('Comment input element:', commentInput);
+            console.log('Comment value:', comment);
+            
+            fetch('/save_comment?file=' + encodeURIComponent(filePath) + '&comment=' + encodeURIComponent(comment))
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Save comment response:', data);
+                    if (data.success) {
+                        // Show success feedback
+                        const btn = commentInput.nextElementSibling;
+                        const originalHTML = btn.innerHTML;
+                        btn.innerHTML = '<i class="fas fa-check"></i>';
+                        btn.style.background = 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)';
+                        
+                        setTimeout(() => {
+                            btn.innerHTML = originalHTML;
+                            btn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                        }, 2000);
+                    } else {
+                        alert('❌ Error: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Save comment error:', error);
+                    alert('❌ Error: ' + error);
+                });
+        }
+        
+        // Load comments on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Restore last open accordion
+            const lastOpenAccordion = localStorage.getItem('lastOpenAccordion');
+            if (lastOpenAccordion) {
+                const content = document.getElementById('content-' + lastOpenAccordion);
+                const icon = document.getElementById('icon-' + lastOpenAccordion);
+                if (content && icon) {
+                    content.classList.remove('collapsed');
+                    icon.style.transform = 'rotate(0deg)';
+                    console.log('Restored open accordion:', lastOpenAccordion);
+                }
+            }
+            
+            // Load comments
+            const commentInputs = document.querySelectorAll('.comment-input');
+            commentInputs.forEach((input, index) => {
+                const filePath = input.getAttribute('data-file');
+                const commentId = input.id;
+                console.log('Loading comment for:', filePath, 'index:', index, 'id:', commentId);
+                
+                // Store the input element reference
+                const currentInput = input;
+                
+                fetch('/get_comment?file=' + encodeURIComponent(filePath))
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log('Comment data for', filePath, ':', data);
+                        if (data.success && data.comment) {
+                            // Use the stored reference instead of re-querying
+                            currentInput.value = data.comment;
+                            console.log('Set comment for', filePath, ':', data.comment);
+                        } else {
+                            // Ensure empty value for new comments
+                            currentInput.value = '';
+                            console.log('Set empty comment for', filePath);
+                        }
+                    })
+                    .catch(error => {
+                        console.log('Error loading comment for', filePath, ':', error);
+                        // Ensure empty value on error
+                        currentInput.value = '';
+                    });
+            });
+        });
+    </script>
+</body>
+</html>
+""", grouped=grouped, containers=containers, selected=selected, start=start, end=end)
 
 @app.route("/view")
 def view():
@@ -158,119 +746,530 @@ def view():
     if download_only:
         return send_file(cast_path, as_attachment=True, download_name=cast_name)
     title = f"Replay {container} from " + os.path.basename(path).split("_shell")[0].replace("_", " ")
-    return f"""<!doctype html><html><head>
-<title>Replay</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.0.1/dist/bundle/asciinema-player.css" />
-<style>
-.search-container {{
-  background: #222; padding: 15px; margin: 20px auto; width: 80%; max-width: 960px; border-radius: 8px;
-}}
-.search-box {{
-  display: flex; gap: 10px; align-items: center; margin-bottom: 10px;
-}}
-.search-input {{
-  flex: 1; padding: 8px; border-radius: 5px; border: 1px solid #444; background: #333; color: #eee;
-}}
-.search-btn {{
-  padding: 8px 15px; background: #0099cc; color: #fff; border: none; border-radius: 5px; cursor: pointer;
-}}
-.search-btn:hover {{ background: #0077aa; }}
-.search-results {{
-  max-height: 200px; overflow-y: auto; background: #333; border-radius: 5px; padding: 10px;
-}}
-.search-result {{
-  padding: 8px; margin: 5px 0; background: #444; border-radius: 3px; cursor: pointer; border-left: 3px solid #0099cc;
-  transition: all 0.2s ease;
-}}
-.search-result:hover {{ 
-  background: #555; 
-  transform: translateX(5px);
-}}
-.search-result.active {{
-  background: #0099cc; color: #000;
-}}
-.search-nav {{
-  display: flex; gap: 10px; justify-content: center; margin-top: 10px;
-}}
-.nav-btn {{
-  padding: 5px 10px; background: #555; color: #fff; border: none; border-radius: 3px; cursor: pointer;
-}}
-.nav-btn:hover {{ background: #666; }}
-.nav-btn:disabled {{ background: #333; color: #666; cursor: not-allowed; }}
-.search-info {{
-  text-align: center; color: #aaa; font-size: 0.9em; margin-top: 5px;
-}}
-.search-info.success {{
-  color: #4CAF50;
-}}
-.search-info.error {{
-  color: #f44336;
-}}
-.search-info.no-results {{
-  color: #ff9800;
-}}
-</style>
-</head><body style="font-family:sans-serif;background:#111;color:#eee;text-align:center">
-<div class="logo" style="margin:15px;"><a href="https://github.com/Frozenka/Exegol-Session-Viewer" target="_blank"><img src="/logo.png" style="height:80px;"></a></div>
-<button onclick="window.location.href='/'" style="background:linear-gradient(45deg, #0099cc, #00c3ff); color:#fff; border:none; padding:10px 20px; border-radius:25px; cursor:pointer; font-weight:bold; box-shadow:0 4px 15px rgba(0,153,204,0.3); transition:all 0.3s ease; margin-bottom:20px;" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 20px rgba(0,153,204,0.4)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 15px rgba(0,153,204,0.3)'">🏠 Back to Home</button>
-<h2>{title}</h2>
-<div id="player" style="width:80%;max-width:960px;margin:auto;"></div>
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Session Player Pro - {title}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.0.1/dist/bundle/asciinema-player.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+            color: #e8e8e8;
+            min-height: 100vh;
+            line-height: 1.6;
+        }}
+        
+        .header {{
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 1rem 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }}
+        
+        .header-content {{
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }}
+        
+        .logo {{
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }}
+        
+        .logo img {{
+            height: 40px;
+            filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.3));
+        }}
+        
+        .logo-text {{
+            font-size: 1.2rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }}
+        
+        .btn-back {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            padding: 0.75rem 1.5rem;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }}
+        
+        .btn-back:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        }}
+        
+        .view-header-content {{
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }}
+        
+        .view-logo {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        
+        .view-logo img {{
+            height: 80px;
+            filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.3));
+        }}
+        
+        .view-back-btn {{
+            position: absolute;
+            right: 2rem;
+        }}
+        
+        .main-content {{
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }}
+        
+        .session-header {{
+            text-align: center;
+            margin-bottom: 2rem;
+        }}
+        
+        .session-title {{
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }}
+        
+        .player-section {{
+            display: grid;
+            grid-template-columns: 1fr 320px;
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }}
+        
+        .player-container {{
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 2rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }}
+        
+        #player {{
+            width: 100%;
+            max-width: 100%;
+            margin: 0 auto;
+        }}
+        
+        .controls-sidebar {{
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }}
+        
+        .control-card {{
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+        }}
+        
+        .control-group {{
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }}
+        
+        .control-title {{
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #a0a0a0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+        }}
+        
+        .time-inputs {{
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }}
+        
+        .time-input {{
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            color: #e8e8e8;
+            font-size: 0.95rem;
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            width: 120px;
+        }}
+        
+        .time-input:focus {{
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            background: rgba(255, 255, 255, 0.15);
+        }}
+        
+        .btn {{
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            border: none;
+            cursor: pointer;
+            color: white;
+        }}
+        
+        .btn-primary {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }}
+        
+        .btn-success {{
+            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+        }}
+        
+        .btn-warning {{
+            background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+        }}
+        
+        .btn-danger {{
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+        }}
+        
+        .btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }}
+        
+        .search-container {{
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }}
+        
+        .search-box {{
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            margin-bottom: 1rem;
+        }}
+        
+        .search-input {{
+            flex: 1;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            color: #e8e8e8;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }}
+        
+        .search-input:focus {{
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            background: rgba(255, 255, 255, 0.15);
+        }}
+        
+        .search-results {{
+            max-height: 300px;
+            overflow-y: auto;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }}
+        
+        .search-result {{
+            padding: 1rem;
+            margin: 0.5rem 0;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            cursor: pointer;
+            border-left: 4px solid #667eea;
+            transition: all 0.3s ease;
+        }}
+        
+        .search-result:hover {{
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateX(5px);
+        }}
+        
 
-<!-- Navigation overlay -->
-<div id="navOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:9999; justify-content:center; align-items:center;">
-  <div style="background:#222; padding:30px; border-radius:15px; text-align:center; box-shadow:0 10px 30px rgba(0,0,0,0.5);">
-    <div style="width:50px; height:50px; border:4px solid #0099cc; border-top:4px solid transparent; border-radius:50%; animation:spin 1s linear infinite; margin:0 auto 20px;"></div>
-    <div style="color:#fff; font-size:18px; font-weight:bold;">Loading...</div>
-    <div style="color:#aaa; font-size:14px; margin-top:10px;">Navigating to selected moment</div>
-  </div>
-</div>
+        
+        .search-info {{
+            text-align: center;
+            color: #a0a0a0;
+            font-size: 0.9rem;
+            margin-top: 1rem;
+            padding: 0.5rem;
+            border-radius: 6px;
+        }}
+        
+        .search-info.success {{
+            background: rgba(76, 175, 80, 0.1);
+            color: #4CAF50;
+            border: 1px solid rgba(76, 175, 80, 0.3);
+        }}
+        
+        .search-info.error {{
+            background: rgba(244, 67, 54, 0.1);
+            color: #f44336;
+            border: 1px solid rgba(244, 67, 54, 0.3);
+        }}
+        
+        .search-info.no-results {{
+            background: rgba(255, 152, 0, 0.1);
+            color: #ff9800;
+            border: 1px solid rgba(255, 152, 0, 0.3);
+        }}
+        
+        .cut-container {{
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }}
+        
+        .cut-buttons {{
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }}
+        
+        .cut-info {{
+            text-align: center;
+            color: #a0a0a0;
+            font-size: 0.9rem;
+            margin-top: 1rem;
+            padding: 0.5rem;
+            border-radius: 6px;
+        }}
+        
+        .nav-overlay {{
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+        }}
+        
+        .nav-overlay-content {{
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 16px;
+            padding: 3rem;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }}
+        
+        .spinner {{
+            width: 50px;
+            height: 50px;
+            border: 4px solid #667eea;
+            border-top: 4px solid transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1.5rem;
+        }}
+        
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+        
+        @media (max-width: 768px) {{
+            .main-content {{
+                padding: 1rem;
+            }}
+            
+            .session-title {{
+                font-size: 1.5rem;
+            }}
+            
+            .player-section {{
+                grid-template-columns: 1fr;
+            }}
+            
+            .time-inputs {{
+                flex-direction: column;
+                align-items: stretch;
+            }}
+            
+            .time-input {{
+                width: 100%;
+            }}
+            
+            .search-box {{
+                flex-direction: column;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="view-header-content">
+            <div class="view-logo">
+                <a href="https://github.com/Frozenka/Exegol-Session-Viewer" target="_blank">
+                    <img src="/logo.png" alt="Exegol">
+                </a>
+            </div>
+            <a href="/" class="btn-back view-back-btn">
+                <i class="fas fa-home"></i> Back to Dashboard
+            </a>
+        </div>
+    </header>
+    
+    <main class="main-content">
+        <div class="session-header">
+            <h1 class="session-title">{title}</h1>
+        </div>
+        
+        <div class="player-section">
+            <div class="player-container">
+                <div id="player"></div>
+            </div>
+            
+            <div class="controls-sidebar">
+                <div class="control-card">
+                    <div class="control-title">Extract Controls</div>
+                    <div class="time-inputs">
+                        <label>Start Time:
+                            <input id="start" type="text" placeholder="00:00" class="time-input">
+                        </label>
+                        <label>End Time:
+                            <input id="end" type="text" placeholder="00:00" class="time-input">
+                        </label>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem;">
+                        <button onclick="downloadExtract()" class="btn btn-primary">
+                            <i class="fas fa-download"></i> Download .cast
+                        </button>
+                        <button onclick="downloadMP4Extract()" class="btn btn-success">
+                            <i class="fas fa-video"></i> Download MP4 Extract
+                        </button>
+                        <button onclick="downloadFullMP4()" class="btn btn-warning">
+                            <i class="fas fa-film"></i> Download Full MP4
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="control-card">
+                    <div class="control-title">Cut Points</div>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        <button onclick="setStartTime()" class="btn btn-success">
+                            <i class="fas fa-flag"></i> Set Start Point
+                        </button>
+                        <button onclick="setEndTime()" class="btn btn-warning">
+                            <i class="fas fa-flag-checkered"></i> Set End Point
+                        </button>
+                    </div>
+                    <div class="cut-info">
+                        Click "Set Start Point" then "Set End Point" during playback to mark cut points
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="search-container">
+            <div class="control-title">Content Search</div>
+            <div class="search-box">
+                <input type="text" id="searchInput" class="search-input" placeholder="Search in session content..." onkeypress="if(event.key==='Enter') searchContent()">
+                <button onclick="searchContent()" class="btn btn-primary" id="searchBtn">
+                    <i class="fas fa-search"></i> Search
+                </button>
+            </div>
+            <div id="searchResults" class="search-results" style="display:none;"></div>
 
+            <div id="searchInfo" class="search-info"></div>
+        </div>
+    </main>
+    
+    <div id="navOverlay" class="nav-overlay">
+        <div class="nav-overlay-content">
+            <div class="spinner"></div>
+            <div style="color:#fff; font-size:1.2rem; font-weight:600; margin-bottom:0.5rem;">Loading...</div>
+            <div style="color:#a0a0a0; font-size:0.9rem;">Navigating to selected moment</div>
+        </div>
+    </div>
 
-<style>
-@keyframes spin {{
-  0% {{ transform: rotate(0deg); }}
-  100% {{ transform: rotate(360deg); }}
-}}
-</style>
-<div style="margin-top:1em;">
-  <label>Start (MM:SS): <input id="start" type="text" placeholder="00:00" style="width:80px;"></label>
-  <label>End (MM:SS): <input id="end" type="text" placeholder="00:44" style="width:80px;"></label>
-  <button onclick="downloadExtract()">💾 Download .cast extract</button>
-  <button onclick="downloadMP4Extract()">🎬 Download MP4 extract</button>
-  <button onclick="downloadFullMP4()">🎬 Download FULL MP4</button>
-</div>
+    <script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.0.1/dist/bundle/asciinema-player.min.js"></script>
+    <script>
+        let searchResults = [];
+        let currentResultIndex = 0;
+        let currentPlayerTime = 0;
 
-<div class="search-container">
-  <div class="search-box">
-    <input type="text" id="searchInput" class="search-input" placeholder="Search in content..." onkeypress="if(event.key==='Enter') searchContent()">
-    <button onclick="searchContent()" class="search-btn" id="searchBtn">🔍 Search</button>
-  </div>
-  <div id="searchResults" class="search-results" style="display:none;"></div>
-  <div id="searchNav" class="search-nav" style="display:none;">
-    <button onclick="previousResult()" class="nav-btn" id="prevBtn">◀ Previous</button>
-    <span id="resultCounter" style="color:#aaa;line-height:30px;"></span>
-    <button onclick="nextResult()" class="nav-btn" id="nextBtn">Next ▶</button>
-  </div>
-  <div id="searchInfo" class="search-info"></div>
-</div>
-
-<div class="cut-container" style="background:#222;padding:15px;margin:20px auto 0 auto;width:80%;max-width:960px;border-radius:8px;">
-  <div style="display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap;">
-    <button onclick="setStartTime()" class="search-btn" style="background:#4CAF50;">🎯 Set Start</button>
-    <button onclick="setEndTime()" class="search-btn" style="background:#ff9800;">🎯 Set End</button>
-  </div>
-  <div style="color:#aaa;font-size:0.9em;text-align:center;margin-top:5px;">Click "Set Start" then "Set End" during playback to mark cut points in the fields above.</div>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.0.1/dist/bundle/asciinema-player.min.js"></script>
-<script>
-let searchResults = [];
-let currentResultIndex = 0;
-let currentPlayerTime = 0;
-
-// Initialize player
-const player = AsciinemaPlayer.create("/raw?file={cast_path}", document.getElementById("player"), {{
-  cols: 100, rows: 30, autoplay: false, preload: true, theme: "asciinema", startAt: {start_time}
+        const player = AsciinemaPlayer.create("/raw?file={cast_path}", document.getElementById("player"), {{
+            cols: 100, rows: 30, autoplay: false, preload: true, theme: "asciinema", startAt: {start_time}
 }});
 
 // Store player instance globally for access by other functions
@@ -443,7 +1442,7 @@ function searchContent() {{
     }});
 }}
 
-// Afficher les résultats de recherche
+// Display search results
 function displaySearchResults() {{
   const resultsDiv = document.getElementById('searchResults');
   const navDiv = document.getElementById('searchNav');
@@ -461,7 +1460,7 @@ function displaySearchResults() {{
     `;
     resultDiv.onclick = () => {{
       goToResult(index);
-      // Effet visuel pour confirmer le clic
+      // Visual effect to confirm click
       resultDiv.style.transform = 'scale(0.98)';
       setTimeout(() => {{
         resultDiv.style.transform = 'scale(1)';
@@ -471,8 +1470,6 @@ function displaySearchResults() {{
   }});
   
   resultsDiv.style.display = 'block';
-  navDiv.style.display = 'flex';
-  updateNavigationButtons();
 }}
 
 
@@ -502,43 +1499,16 @@ function goToResult(index) {{
   }}, 5000);
 }}
 
-// Navigation vers le résultat précédent
-function previousResult() {{
-  if (currentResultIndex > 0) {{
-    goToResult(currentResultIndex - 1);
-  }}
-}}
 
-// Navigation vers le résultat suivant
-function nextResult() {{
-  if (currentResultIndex < searchResults.length - 1) {{
-    goToResult(currentResultIndex + 1);
-  }}
-}}
 
-// Mettre à jour les boutons de navigation
-function updateNavigationButtons() {{
-  const prevBtn = document.getElementById('prevBtn');
-  const nextBtn = document.getElementById('nextBtn');
-  
-  prevBtn.disabled = currentResultIndex === 0;
-  nextBtn.disabled = currentResultIndex === searchResults.length - 1;
-}}
-
-// Mettre à jour le compteur de résultats
-function updateResultCounter() {{
-  const counter = document.getElementById('resultCounter');
-  counter.textContent = `${{currentResultIndex + 1}} / ${{searchResults.length}}`;
-}}
-
-// Afficher les informations de recherche
+// Display search information
 function showSearchInfo(message, type) {{
   const infoDiv = document.getElementById('searchInfo');
   infoDiv.textContent = message;
   infoDiv.className = `search-info ${{type}}`;
 }}
 
-// Masquer les résultats de recherche
+// Hide search results
 function hideSearchResults() {{
   document.getElementById('searchResults').style.display = 'none';
   document.getElementById('searchNav').style.display = 'none';
@@ -586,7 +1556,7 @@ function downloadMP4Extract() {{
 }}
 function downloadFullMP4() {{
   let url = `/processing?file={path}`;
-  alert('MP4 generation is experimental and may not work perfectly.');
+  alert('MP4 generation is verry long.');
   window.open(url);
 }}
 </script>
@@ -594,17 +1564,39 @@ function downloadFullMP4() {{
 <script>
 </script>
 
-<footer style="margin-top:30px;font-size:0.9em;color:#777;">Made for <a href="https://exegol.com" target="_blank" style="color:#aaa;font-weight:bold;">Exegol</a> with ❤️</footer>
+<footer style="margin-top:30px;font-size:0.9em;color:#777;text-align:center;">Made for <a href="https://exegol.com" target="_blank" style="color:#aaa;font-weight:bold;">Exegol</a> with ❤️</footer>
 </body></html>"""
 
 @app.route("/processing")
 def processing():
     file = request.args.get("file")
+    print(f"[DEBUG] Processing request for file: {file}")
+    
     cast_path = convert_to_cast(file)
+    print(f"[DEBUG] Cast path: {cast_path}")
+    
     mp4_path = cast_path.replace(".cast", ".mp4")
     progress_path = mp4_path + ".progress"
+    
+    print(f"[DEBUG] MP4 path: {mp4_path}")
+    print(f"[DEBUG] Progress path: {progress_path}")
+    print(f"[DEBUG] MP4 exists: {os.path.exists(mp4_path)}")
+    print(f"[DEBUG] Progress exists: {os.path.exists(progress_path)}")
+    
     if not (os.path.exists(mp4_path) or os.path.exists(progress_path)):
-        threading.Thread(target=convert_cast_to_mp4_progress, args=(cast_path, mp4_path, progress_path), daemon=True).start()
+        print(f"[DEBUG] Starting conversion thread...")
+        try:
+            thread = threading.Thread(target=convert_cast_to_mp4_progress, args=(cast_path, mp4_path, progress_path), daemon=True)
+            thread.start()
+            print(f"[DEBUG] Thread started successfully")
+        except Exception as e:
+            print(f"[DEBUG] Error starting thread: {e}")
+            # Create initial progress file to show error
+            with open(progress_path, "w") as pf:
+                pf.write(json.dumps({"progress": 0, "done": False, "text": f"Error starting conversion: {e}"}))
+    else:
+        print(f"[DEBUG] File already exists or conversion in progress")
+    
     return render_template_string("""
 <html><head>
 <title>Generating MP4...</title>
@@ -652,15 +1644,24 @@ setTimeout(poll, 1000);
 def progress():
     file = request.args.get("file")
     progress_path = file + ".progress"
+    
+    print(f"[DEBUG] Progress check - File: {file}")
+    print(f"[DEBUG] Progress check - File exists: {os.path.exists(file)}")
+    print(f"[DEBUG] Progress check - Progress exists: {os.path.exists(progress_path)}")
+    
     if os.path.exists(file):
+        print(f"[DEBUG] Progress check - File ready, returning done")
         return jsonify({"progress": 1.0, "done": True, "text": "Done!"})
     if os.path.exists(progress_path):
         try:
             with open(progress_path, "r") as f:
                 j = json.load(f)
+            print(f"[DEBUG] Progress check - Progress data: {j}")
             return jsonify(j)
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] Progress check - Error reading progress: {e}")
             return jsonify({"progress": 0, "done": False, "text": "Waiting..."})
+    print(f"[DEBUG] Progress check - No file or progress, returning initializing")
     return jsonify({"progress": 0, "done": False, "text": "Initializing..."})
 
 @app.route("/download_mp4")
@@ -730,6 +1731,9 @@ function poll() {
         setTimeout(function(){
           window.location.href="/download_mp4?file={{ mp4_path }}";
         }, 1000);
+      } else {
+        let p = Math.floor(data.progress * 100);
+        bar.style.width = p + "%";
         bar.innerText = p + "%";
         progtxt.innerText = data.text;
         setTimeout(poll, 1500);
@@ -765,7 +1769,7 @@ def search():
                     evt = json.loads(line)
                     if isinstance(evt, list) and len(evt) >= 3 and evt[1] == "o":
                         events.append(evt)
-                        # Recherche dans le contenu de sortie
+                        # Search in output content
                         if query.lower() in evt[2].lower():
                             search_results.append({
                                 "index": len(events) - 1,
@@ -786,7 +1790,7 @@ def search():
         return jsonify({"error": str(e), "results": [], "total": 0})
 
 def get_session_duration(path):
-    """Calcule la durée d'une session en lisant le fichier asciinema"""
+    """Calculate session duration by reading the asciinema file"""
     try:
         opener = gzip.open if path.endswith(".gz") else open
         with opener(path, 'rt', encoding='utf-8', errors='ignore') as f_in:
@@ -804,7 +1808,7 @@ def get_session_duration(path):
                 return events[-1] - events[0]
             return 0
     except Exception as e:
-        print(f"[!] Erreur calcul durée session {path}: {e}")
+        print(f"[!] Error calculating session duration {path}: {e}")
         return 0
 
 def format_time(seconds):
@@ -812,16 +1816,22 @@ def format_time(seconds):
     secs = int(seconds % 60)
     return f"{minutes:02d}:{secs:02d}"
 
+
+
 def convert_to_cast(path):
+    """Convert asciinema file to cast format with validation and cleaning"""
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".cast", mode="w", encoding="utf-8")
     opener = gzip.open if path.endswith(".gz") else open
+    
     with opener(path, 'rt', encoding='utf-8', errors='ignore') as f_in:
         try:
             header_line = next(f_in)
         except StopIteration:
-            print(f"[!] Fichier vide : {path}")
+            print(f"[!] Empty file: {path}")
             tmp.close()
             return tmp.name
+        
+        # Parse and validate header
         header = {
             "version": 2,
             "width": 100,
@@ -829,28 +1839,122 @@ def convert_to_cast(path):
             "timestamp": int(os.path.getmtime(path)),
             "env": {"TERM": "xterm", "SHELL": "/bin/bash"}
         }
+        
         try:
             maybe_header = json.loads(header_line)
             if isinstance(maybe_header, dict) and "version" in maybe_header:
                 header.update(maybe_header)
         except Exception as e:
-            print(f"[!] Erreur parsing header: {e}")
+            print(f"[!] Header parsing error: {e}")
+        
+        # Write header
         tmp.write(json.dumps(header) + "\n")
+        
+        # Parse all events first
+        events = []
         for line in f_in:
             if line.strip().startswith("["):
                 try:
                     evt = json.loads(line)
-                    if isinstance(evt, list) and evt[1] == "o":
-                        if evt[2].strip():
-                            tmp.write(json.dumps([evt[0], "o", evt[2]]) + "\n")
+                    if isinstance(evt, list) and len(evt) >= 3:
+                        events.append(evt)
                 except Exception as e:
-                    print(f"[!] Ligne ignorée: {e} : {line[:80]}")
+                    print(f"[!] Ignored line: {e} : {line[:80]}")
+        
+        # Write events directly
+        for event in events:
+            tmp.write(json.dumps(event) + "\n")
+    
     tmp.close()
     return tmp.name
 
+def get_exegol_colors():
+    """Get the exact colors used by Exegol terminal theme"""
+    return {
+        'fg': 'magenta',  # Exegol uses magenta for main commands
+        'bg': 'black'     # Dark background like Exegol
+    }
+
+def clean_color_for_tty2img(color):
+    """Convert any color format to a format supported by tty2img"""
+    if not color:
+        return 'white'
+    
+    color_str = str(color).lower().strip()
+    
+    # Handle hex colors
+    if color_str.startswith('#'):
+        # Convert common hex colors to named colors
+        hex_to_name = {
+            '#000000': 'black',
+            '#ffffff': 'white',
+            '#ff0000': 'red',
+            '#00ff00': 'green',
+            '#0000ff': 'blue',
+            '#ffff00': 'yellow',
+            '#ff00ff': 'magenta',
+            '#00ffff': 'cyan',
+            '#808080': 'gray',
+            '#c0c0c0': 'lightgray',
+            '#800000': 'darkred',
+            '#008000': 'darkgreen',
+            '#000080': 'darkblue',
+            '#808000': 'darkyellow',
+            '#800080': 'darkmagenta',
+            '#008080': 'darkcyan'
+        }
+        return hex_to_name.get(color_str, 'white')
+    
+    # Handle bright colors
+    if 'bright' in color_str:
+        color_map = {
+            'brightblack': 'gray',
+            'brightred': 'red',
+            'brightgreen': 'green',
+            'brightyellow': 'yellow',
+            'brightblue': 'blue',
+            'brightmagenta': 'magenta',
+            'brightcyan': 'cyan',
+            'brightwhite': 'white'
+        }
+        return color_map.get(color_str, 'white')
+    
+    # Handle standard colors
+    standard_colors = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white', 'gray']
+    if color_str in standard_colors:
+        return color_str
+    
+    # Default fallback
+    return 'white'
+
 def convert_cast_to_mp4_progress(cast_path, mp4_path, progress_path):
+    print(f"[DEBUG] === CONVERSION THREAD STARTED ===")
+    print(f"[DEBUG] Thread ID: {threading.current_thread().ident}")
+    print(f"[DEBUG] Cast path: {cast_path}")
+    print(f"[DEBUG] MP4 path: {mp4_path}")
+    print(f"[DEBUG] Progress path: {progress_path}")
+    
     try:
         print(f"[DEBUG] Starting MP4 conversion: {cast_path} → {mp4_path}")
+        
+        # Clean up old files periodically
+        cleanup_old_files()
+        
+        # Check if cast file exists
+        if not os.path.exists(cast_path):
+            print(f"[DEBUG] ERROR: Cast file does not exist: {cast_path}")
+            with open(progress_path, "w") as pf:
+                pf.write(json.dumps({"progress": 0, "done": False, "text": f"Error: Cast file not found: {cast_path}"}))
+            return
+        
+        # Check if file already exists (cache)
+        if os.path.exists(mp4_path):
+            print(f"[DEBUG] MP4 file already exists: {mp4_path}")
+            with open(progress_path, "w") as pf:
+                pf.write(json.dumps({"progress": 1.0, "done": True, "text": "File already exists"}))
+            return
+        
+        print(f"[DEBUG] Cast file exists, starting conversion...")
         with open(cast_path) as f:
             lines = f.readlines()
         header = json.loads(lines[0])
@@ -864,36 +1968,86 @@ def convert_cast_to_mp4_progress(cast_path, mp4_path, progress_path):
         images = []
         timestamps = []
         font_size = 18
+        
         print(f"[DEBUG] Total events: {total}, duration: {duration:.2f}s")
-        for i, evt in enumerate(events):
+        
+        # Optimize: Only process output events and skip static frames
+        output_events = [evt for evt in events if evt[1] == "o"]
+        print(f"[DEBUG] Output events: {len(output_events)}")
+        
+        last_screen_hash = None
+        for i, evt in enumerate(output_events):
             try:
                 stream.feed(evt[2])
-                if evt[1] == "o":
-                    img = tty2img.tty2img(screen, fontSize=font_size, fgDefaultColor='lime', bgDefaultColor='black')
-                    img = img.convert("RGB")
-                    images.append(np.array(img))
-                    timestamps.append(evt[0])
+                
+                # Create screen hash to detect changes
+                screen_content = str(screen.display)
+                current_hash = hash(screen_content)
+                
+                # Only generate frame if screen changed
+                if current_hash != last_screen_hash:
+                    # Use Exegol theme colors for exact match with Exegol terminal
+                    colors = get_exegol_colors()
+                    fg_color = clean_color_for_tty2img(colors['fg'])
+                    bg_color = clean_color_for_tty2img(colors['bg'])
+                    
+                    try:
+                        img = tty2img.tty2img(screen, fontSize=font_size, 
+                                             fgDefaultColor=fg_color, 
+                                             bgDefaultColor=bg_color)
+                        img = img.convert("RGB")
+                        images.append(np.array(img))
+                        timestamps.append(evt[0])
+                        last_screen_hash = current_hash
+                    except Exception as color_error:
+                        print(f"[DEBUG] Color error, using fallback colors: {color_error}")
+                        # Fallback to basic colors if there's a color issue
+                        img = tty2img.tty2img(screen, fontSize=font_size, 
+                                             fgDefaultColor='white', 
+                                             bgDefaultColor='black')
+                        img = img.convert("RGB")
+                        images.append(np.array(img))
+                        timestamps.append(evt[0])
+                        last_screen_hash = current_hash
+                    
+                    # Progress update every 5 frames or at the end
+                    if len(images) % 5 == 0 or i == len(output_events) - 1:
+                        with open(progress_path, "w") as pf:
+                            pf.write(json.dumps({
+                                "progress": i / len(output_events) if output_events else 1,
+                                "done": False,
+                                "text": f"Processing frame {len(images)} (t={evt[0]:.1f}s)"
+                            }))
+                        
             except Exception as e:
                 print(f"[!] Frame {i} error: {e}")
-            if i % 10 == 0 or i == total - 1:
-                with open(progress_path, "w") as pf:
-                    pf.write(json.dumps({
-                        "progress": i / total if total else 1,
-                        "done": False,
-                        "text": f"Processing frame {i+1}/{total} (t={evt[0]:.1f}s)"
-                    }))
-        print(f"[DEBUG] Generated {len(images)} frames, timestamps: {timestamps[:10]}")
+        
+        print(f"[DEBUG] Generated {len(images)} frames (optimized from {len(output_events)} events)")
+        
         if len(timestamps) > 1:
             durations = [s2 - s1 for s1, s2 in zip(timestamps, timestamps[1:])]
             mean_duration = sum(durations) / len(durations)
         else:
             mean_duration = 0.5
+            
         with open(progress_path, "w") as pf:
             pf.write(json.dumps({"progress": 1.0, "done": False, "text": "Encoding MP4..."}))
+            
         if len(images) > 0:
             fps = 1 / mean_duration if mean_duration > 0 else 2
+            # Ensure minimum FPS for compatibility
+            fps = max(fps, 5)  # Minimum 5 fps for better compatibility
+            # Optimize encoding parameters
             clip = mpy.ImageSequenceClip(images, fps=fps)
-            clip.write_videofile(mp4_path, codec="libx264", fps=fps, audio=False, logger=None)
+            clip.write_videofile(
+                mp4_path, 
+                codec="libx264", 
+                fps=fps, 
+                audio=False, 
+                logger=None,
+                preset="ultrafast",  # Faster encoding
+                ffmpeg_params=["-profile:v", "baseline", "-level", "3.0"]  # Better compatibility
+            )
             print(f"[DEBUG] MP4 file written: {mp4_path}")
             with open(progress_path, "w") as pf:
                 pf.write(json.dumps({"progress": 1.0, "done": True, "text": "Done"}))
@@ -906,9 +2060,42 @@ def convert_cast_to_mp4_progress(cast_path, mp4_path, progress_path):
         with open(progress_path, "w") as pf:
             pf.write(json.dumps({"progress": 0, "done": False, "text": f"Error: {e}"}))
 
+def cleanup_old_files():
+    """Clean up old temporary files to save disk space"""
+    temp_dir = tempfile.gettempdir()
+    current_time = time.time()
+    max_age = 3600  # 1 hour for .cast and .progress files
+    max_age_mp4 = 86400  # 24 hours for .mp4 files (keep them longer)
+    
+    for filename in os.listdir(temp_dir):
+        if filename.endswith('.mp4') or filename.endswith('.cast') or filename.endswith('.progress'):
+            filepath = os.path.join(temp_dir, filename)
+            if os.path.isfile(filepath):
+                file_age = current_time - os.path.getmtime(filepath)
+                # Use different max age for MP4 files
+                max_age_for_file = max_age_mp4 if filename.endswith('.mp4') else max_age
+                
+                if file_age > max_age_for_file:
+                    try:
+                        os.remove(filepath)
+                        print(f"[DEBUG] Cleaned up old file: {filename}")
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to clean up {filename}: {e}")
+
 def convert_cast_to_mp4_progress_extract(cast_path, mp4_path, progress_path, start_time, end_time):
     try:
         print(f"[DEBUG] Starting MP4 extract conversion: {cast_path} → {mp4_path} ({start_time:.1f}s to {end_time:.1f}s)")
+        
+        # Clean up old files periodically
+        cleanup_old_files()
+        
+        # Check if file already exists (cache)
+        if os.path.exists(mp4_path):
+            print(f"[DEBUG] MP4 extract file already exists: {mp4_path}")
+            with open(progress_path, "w") as pf:
+                pf.write(json.dumps({"progress": 1.0, "done": True, "text": "File already exists"}))
+            return
+        
         with open(cast_path) as f:
             lines = f.readlines()
         header = json.loads(lines[0])
@@ -928,35 +2115,84 @@ def convert_cast_to_mp4_progress_extract(cast_path, mp4_path, progress_path, sta
         timestamps = []
         font_size = 18
         print(f"[DEBUG] Total events: {total}, duration: {duration:.2f}s")
-        for i, evt in enumerate(filtered_events):
+        
+        # Optimize: Only process output events and skip static frames
+        output_events = [evt for evt in filtered_events if evt[1] == "o"]
+        print(f"[DEBUG] Output events: {len(output_events)}")
+        
+        last_screen_hash = None
+        for i, evt in enumerate(output_events):
             try:
                 stream.feed(evt[2])
-                if evt[1] == "o":
-                    img = tty2img.tty2img(screen, fontSize=font_size, fgDefaultColor='lime', bgDefaultColor='black')
-                    img = img.convert("RGB")
-                    images.append(np.array(img))
-                    timestamps.append(evt[0])
+                
+                # Create screen hash to detect changes
+                screen_content = str(screen.display)
+                current_hash = hash(screen_content)
+                
+                # Only generate frame if screen changed
+                if current_hash != last_screen_hash:
+                    # Use Exegol theme colors for exact match with Exegol terminal
+                    colors = get_exegol_colors()
+                    fg_color = clean_color_for_tty2img(colors['fg'])
+                    bg_color = clean_color_for_tty2img(colors['bg'])
+                    
+                    try:
+                        img = tty2img.tty2img(screen, fontSize=font_size, 
+                                             fgDefaultColor=fg_color, 
+                                             bgDefaultColor=bg_color)
+                        img = img.convert("RGB")
+                        images.append(np.array(img))
+                        timestamps.append(evt[0])
+                        last_screen_hash = current_hash
+                    except Exception as color_error:
+                        print(f"[DEBUG] Color error, using fallback colors: {color_error}")
+                        # Fallback to basic colors if there's a color issue
+                        img = tty2img.tty2img(screen, fontSize=font_size, 
+                                             fgDefaultColor='white', 
+                                             bgDefaultColor='black')
+                        img = img.convert("RGB")
+                        images.append(np.array(img))
+                        timestamps.append(evt[0])
+                        last_screen_hash = current_hash
+                    
+                    # Progress update every 5 frames or at the end
+                    if len(images) % 5 == 0 or i == len(output_events) - 1:
+                        with open(progress_path, "w") as pf:
+                            pf.write(json.dumps({
+                                "progress": i / len(output_events) if output_events else 1,
+                                "done": False,
+                                "text": f"Processing frame {len(images)} (t={evt[0]:.1f}s)"
+                            }))
+                        
             except Exception as e:
                 print(f"[!] Frame {i} error: {e}")
-            if i % 10 == 0 or i == total - 1:
-                with open(progress_path, "w") as pf:
-                    pf.write(json.dumps({
-                        "progress": i / total if total else 1,
-                        "done": False,
-                        "text": f"Processing frame {i+1}/{total} (t={evt[0]:.1f}s)"
-                    }))
-        print(f"[DEBUG] Generated {len(images)} frames, timestamps: {timestamps[:10]}")
+        
+        print(f"[DEBUG] Generated {len(images)} frames (optimized from {len(output_events)} events)")
+        
         if len(timestamps) > 1:
             durations = [s2 - s1 for s1, s2 in zip(timestamps, timestamps[1:])]
             mean_duration = sum(durations) / len(durations)
         else:
             mean_duration = 0.5
+            
         with open(progress_path, "w") as pf:
             pf.write(json.dumps({"progress": 1.0, "done": False, "text": "Encoding MP4..."}))
+            
         if len(images) > 0:
             fps = 1 / mean_duration if mean_duration > 0 else 2
+            # Ensure minimum FPS for compatibility
+            fps = max(fps, 5)  # Minimum 5 fps for better compatibility
+            # Optimize encoding parameters
             clip = mpy.ImageSequenceClip(images, fps=fps)
-            clip.write_videofile(mp4_path, codec="libx264", fps=fps, audio=False, logger=None)
+            clip.write_videofile(
+                mp4_path, 
+                codec="libx264", 
+                fps=fps, 
+                audio=False, 
+                logger=None,
+                preset="ultrafast",  # Faster encoding
+                ffmpeg_params=["-profile:v", "baseline", "-level", "3.0"]  # Better compatibility
+            )
             print(f"[DEBUG] MP4 extract file written: {mp4_path}")
             with open(progress_path, "w") as pf:
                 pf.write(json.dumps({"progress": 1.0, "done": True, "text": "Done"}))
